@@ -921,9 +921,19 @@ class p25_rx_block (gr.top_block):
             return
         filenames = [sink.gnuplot.filename for sink in self.plot_sinks if sink.gnuplot.filename]
         error = None
+        signal_quality = 0
+        signal_locked = 0
         if self.demod is not None:
             error = self.demod.get_freq_error()
-        d = {'json_type': 'rx_update', 'error': error, 'fine_tune': self.options.fine_tune, 'files': filenames}
+            try:
+                signal_quality = self.demod.quality()
+            except:
+                signal_quality = 0
+            try:
+                signal_locked = self.demod.locked()
+            except:
+                signal_locked = 0
+        d = {'json_type': 'rx_update', 'error': error, 'fine_tune': self.options.fine_tune, 'files': filenames, 'signal_quality': signal_quality, 'signal_locked': signal_locked}
         msg = gr.message().make_from_string(json.dumps(d), -4, 0, 0)
         if not self.input_q.full_p():
             self.input_q.insert_tail(msg)

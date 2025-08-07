@@ -23,6 +23,40 @@
 const lastUpdate = "28-Apr-2025 9:46";
 
 var d_debug = 1;
+
+// Function to create a signal strength bar
+function createSignalBar(quality, locked) {
+    // Normalize quality to 0-100 range (assuming quality is between 0-1 or 0-100)
+    let normalizedQuality = quality;
+    if (quality <= 1.0) {
+        normalizedQuality = quality * 100;
+    }
+    
+    // Clamp to 0-100 range
+    normalizedQuality = Math.max(0, Math.min(100, normalizedQuality));
+    
+    // Determine colors based on signal strength
+    let barColor = '#ff4444'; // Red for poor signal
+    if (normalizedQuality > 70) {
+        barColor = '#44ff44'; // Green for good signal
+    } else if (normalizedQuality > 40) {
+        barColor = '#ffaa44'; // Orange for medium signal
+    }
+    
+    // Add visual indicator for lock status
+    const lockIndicator = locked ? '🔒' : '';
+    
+    // Create the signal bar HTML
+    const barWidth = Math.max(5, normalizedQuality); // Minimum 5% width for visibility
+    return `
+        <div style="display: flex; align-items: center; width: 60px;">
+            <div style="width: 50px; height: 12px; background-color: #333; border: 1px solid #666; border-radius: 2px; overflow: hidden;">
+                <div style="width: ${barWidth}%; height: 100%; background-color: ${barColor}; transition: width 0.3s ease;"></div>
+            </div>
+            <span style="font-size: 10px; margin-left: 2px;">${lockIndicator}</span>
+        </div>
+    `;
+}
 // default smartColors - will be overwritten by smartColors contained in json, if present
 var smartColors = [{keywords:["fire","fd"],color:"#ff5c5c"},{keywords:["pd","police","sheriff","so"],color:"#66aaff"},{keywords:["ems","med","amr","ambulance"],color:"#ffb84d"}];
 var counter1 = 0;
@@ -301,19 +335,17 @@ function term_config(d) {  // json_type: "terminal_config"
 
 
 function rx_update(d) {
-
-	var plotsCount = d["files"].length;
-	document.getElementById('plotsCount').innerText = plotsCount;
+    var plotsCount = d["files"].length;
+    document.getElementById("plotsCount").innerText = plotsCount;
 
     plotfiles = [];
-    
-    if ((d["files"] != undefined) && (d["files"].length > 0)) {
-        for (var i=0; i < d["files"].length; i++) {
+
+    if (d["files"] != undefined && d["files"].length > 0) {
+        for (var i = 0; i < d["files"].length; i++) {
             if (channel_list.length > 0) {
-                expr = new RegExp("plot\-" + channel_list[channel_index] + "\-");
-            }
-            else {
-                expr = new RegExp("plot\-0\-");
+                expr = new RegExp("plot-" + channel_list[channel_index] + "-");
+            } else {
+                expr = new RegExp("plot-0-");
             }
 
             if (expr.test(d["files"][i])) {
@@ -321,34 +353,42 @@ function rx_update(d) {
             }
         }
 
-        for (var i=0; i < 6; i++) {
+        for (var i = 0; i < 6; i++) {
             var img = document.getElementById("img" + i);
             if (i < plotfiles.length) {
-                if (img['src'] != plotfiles[i]) {
-                    img['src'] = plotfiles[i];
+                if (img["src"] != plotfiles[i]) {
+                    img["src"] = plotfiles[i];
                     img.style["display"] = "";
                 }
-            }
-            else {
+            } else {
                 img.style["display"] = "none";
             }
         }
-    }
-    else {
+    } else {
         var img = document.getElementById("img0");
         img.style["display"] = "none";
     }
-    
+
     updatePlotButtonStyles();
-    
+
     if (d["error"] != undefined) {
         error_val = d["error"];
     } else {
         error_val = null;
     }
-    
-    if (d["fine_tune"] != undefined)
-        fine_tune = d["fine_tune"];
+
+    // Handle signal strength data
+    if (d["signal_quality"] != undefined && d["signal_locked"] != undefined) {
+        const signalElement = document.getElementById("signalStrength");
+        if (signalElement) {
+            signalElement.innerHTML = createSignalBar(
+                d["signal_quality"],
+                d["signal_locked"]
+            );
+        }
+    }
+
+    if (d["fine_tune"] != undefined) fine_tune = d["fine_tune"];
 }
 
 // frequency, system, and talkgroup display
@@ -511,7 +551,8 @@ function channel_table(d) {
 	const channelInfo = document.getElementById("channelInfo");
 	
 	let html = "<table class='compact-table' style='border-collapse: collapse;'>";
-	html += "<tr><th>Ch</th><th>Name</th><th>System</th><th>Frequency</th><th colspan='2' style='width: 140px;'>Talkgroup</th><th>Mode</th><th>Hold</th><th>Capture</th><th>Error</th></tr>";
+	html +=
+        "<tr><th>Ch</th><th>Name</th><th>System</th><th>Frequency</th><th colspan='2' style='width: 140px;'>Talkgroup</th><th>Mode</th><th>Hold</th><th>Capture</th><th>Signal</th><th>Error</th></tr>";
 	
 	for (const ch of d.channels) {
 		const entry = d[ch];
@@ -531,6 +572,11 @@ function channel_table(d) {
 		  let mode = entry.tdma;
 		const enc = entry.encrypted;
 		const cap = entry.capture === true ? "<span style='color: #0f0;'>On</span>" : "<span style='color: #aaa;'>Off</span>";
+		
+		// Signal strength bar
+		const signal_quality = entry.signal_quality || 0;
+		const signal_locked = entry.signal_locked || 0;
+		const signal_bar = createSignalBar(signal_quality, signal_locked);
 		
 		// highlight the selected channel in the channels table
 		if (Number(ch) == Number(channel_list[channel_index])) {
@@ -556,6 +602,7 @@ function channel_table(d) {
 			<td>${mode}${dispEnc}</td>			
 			<td${tdh}>${hold}</td>
 			<td>${cap}</td>
+			<td>${signal_bar}</td>
 			<td>${error}</td>
 		</tr>`;
 	}

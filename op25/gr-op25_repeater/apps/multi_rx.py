@@ -543,6 +543,22 @@ class channel(object):
     def get_error(self):
         return self.error
 
+    def get_signal_quality(self):
+        if self.chan_idle or self.demod is None:
+            return 0
+        try:
+            return self.demod.quality()
+        except:
+            return 0
+
+    def get_signal_locked(self):
+        if self.chan_idle or self.demod is None:
+            return 0
+        try:
+            return self.demod.locked()
+        except:
+            return 0
+
 class rx_block (gr.top_block):
 
     # Initialize the receiver
@@ -919,9 +935,12 @@ class rx_block (gr.top_block):
             return False
         params = json.loads(self.trunk_rx.get_chan_status())   # extract data from all channels
         for rx_id in params['channels']:                       # iterate and convert stream name to url
-            params[rx_id]['ppm'] = self.find_channel(int(rx_id)).device.get_ppm()
-            params[rx_id]['capture'] = False if self.find_channel(int(rx_id)).raw_sink is None else True
-            params[rx_id]['error'] = self.find_channel(int(rx_id)).get_error()
+            channel = self.find_channel(int(rx_id))
+            params[rx_id]['ppm'] = channel.device.get_ppm()
+            params[rx_id]['capture'] = False if channel.raw_sink is None else True
+            params[rx_id]['error'] = channel.get_error()
+            params[rx_id]['signal_quality'] = channel.get_signal_quality()
+            params[rx_id]['signal_locked'] = channel.get_signal_locked()
             s_name = params[rx_id]['stream']
             if s_name not in self.meta_streams:
                 continue
