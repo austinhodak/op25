@@ -545,7 +545,7 @@ class p25_system(object):
     def __init__(self, debug, config, rx_ctl = None):
         self.config = config
         self.debug = debug
-        self.rx_ctl = rx_ctl
+        self.rx_ctl = rx_ctl  # Store reference to rx_ctl for message injection
         self.freq_table = {}
         self.voice_frequencies = {}
         self.talkgroups = {}
@@ -571,6 +571,8 @@ class p25_system(object):
         self.sites = {}
         self.last_site_check = 0.0
         self.scanning_mode = DEFAULT_SCANNING_MODE
+        self.last_timeout_inject = 0.0
+        self.rx_queue = None  # Will be set by rx_ctl when available
         self.last_tsbk = 0.0
         self.secondary = {}
         self.adjacent = {}
@@ -814,31 +816,15 @@ class p25_system(object):
             if self.debug > 10:
                 sys.stderr.write("%s [%s] Assigning control channel to receiver[%d]\n" % (log_ts.get(), self.sysname, msgq_id))
 
-            # Check for site scanning - this is the main periodic check
+            # Check for site scanning when control channel is requested
             current_time = time.time()
-            if self.multi_site_scanner:
-                # Force a site switch check every time get_cc is called
-                if self.multi_site_scanner.should_switch_site(current_time):
-                    if self.multi_site_scanner.switch_to_next_site(current_time):
-                        # Update legacy cc_list and cc_index for compatibility
-                        current_site = self.multi_site_scanner.get_current_site()
-                        if current_site:
-                            self.cc_list = current_site.control_channels.copy()
-                            self.cc_index = current_site.cc_index
-                            
-                # Also force periodic timeout-based switching by clearing CC assignment
-                # This ensures switching happens even when there are no natural timeouts
-                time_since_switch = current_time - self.multi_site_scanner.last_site_switch
-                scan_timeout = getattr(self.multi_site_scanner, 'scan_timeout', 1.0)
-                
-                if time_since_switch > (scan_timeout + 0.5):  # Add 0.5s grace period
+            if self.multi_site_scanner and self.multi_site_scanner.should_switch_site(current_time):
+                if self.multi_site_scanner.switch_to_next_site(current_time):
+                    # Update legacy cc_list and cc_index for compatibility
                     current_site = self.multi_site_scanner.get_current_site()
-                    if current_site and not current_site.has_recent_activity(current_time, self.multi_site_scanner.activity_threshold):
-                        # Force a site switch by making this call fail, which will trigger timeout_cc
-                        self.cc_msgq_id = None
-                        if self.debug >= 5:
-                            sys.stderr.write("%s [%s] Forcing site switch due to inactivity timeout\n" % (log_ts.get(), self.sysname))
-                        return None
+                    if current_site:
+                        self.cc_list = current_site.control_channels.copy()
+                        self.cc_index = current_site.cc_index
                         
             assert self.cc_list[self.cc_index]
             return self.cc_list[self.cc_index]
@@ -953,6 +939,28 @@ class p25_system(object):
             if current_site:
                 current_site.update_activity(curr_time)
                 current_site.last_tsbk = curr_time
+                
+            # Inject artificial timeout messages to force site switching
+            if self.multi_site_scanner.should_switch_site(curr_time):
+                # Check if enough time has passed since last injection
+                if (curr_time - self.last_timeout_inject) >= 0.1:
+                    self.last_timeout_inject = curr_time
+                    
+                    # Find the receiver that has the control channel and inject a timeout
+                    if self.cc_msgq_id is not None and self.rx_ctl:
+                        for rcvr in self.rx_ctl.receivers:
+                            receiver = self.rx_ctl.receivers[rcvr]['rx_rcvr']
+                            if receiver and receiver.msgq_id == self.cc_msgq_id:
+                                if self.debug >= 5:
+                                    sys.stderr.write("%s [%s] Injecting timeout message to force site switch\n" % (log_ts.get(), self.sysname))
+                                
+                                # Create and inject a timeout message (type -1)
+                                timeout_msg = gr.message().make_from_string("", -1, self.cc_msgq_id << 1, 0)
+                                
+                                # Inject into the receiver's message queue if available
+                                if hasattr(self.rx_ctl, 'rx_q') and not self.rx_ctl.rx_q.full_p():
+                                    self.rx_ctl.rx_q.insert_tail(timeout_msg)
+                                break
 
         updated = 0
         if m_type == 7:                                     # TSBK
