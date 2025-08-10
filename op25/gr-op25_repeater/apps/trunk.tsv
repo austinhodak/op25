@@ -1,2 +1,2 @@
-"Sysname"	"Control Channel List"	"Offset"	"NAC"	"Modulation"	"TGID Tags File"	"Whitelist"	"Blacklist"	"Center Frequency"
-"P25 SYSTEM"	"876.54320"	"0"	"0"	"cqpsk"	""	""	""	""
+"sysname"	"control_channel_list"	"offset"	"nac"	"modulation"	"tgid_tags_file"	"whitelist"	"blacklist"	"center_frequency"
+"Erie County"	"460.025"	"0"	"0"	"cqpsk"	"talkgroups.tsv"	""	""	""
