@@ -43,7 +43,7 @@
                 "nac": "0x0",
                 "#sysid": "0x4a2",
                 "#wacn": "0xbee00",
-                "control_channel_list": "460.025",
+                "#control_channel_list": "460.025",
                 "tgid_tags_file": "talkgroups.tsv",
                 "#rid_tags_file": "rid-tags.tsv",
                 "whitelist": "",
@@ -69,7 +69,20 @@
                         "3": { "alias": "Edinboro" },
                         "4": { "alias": "Ripley" }
                     }
-                }
+                },
+                "scanning_mode": "priority",
+                "sites": [
+                    {
+                        "site_id": "site1",
+                        "name": "Citywide",
+                        "control_channel_list": "460.025"
+                    },
+                    {
+                        "site_id": "site2",
+                        "name": "Countywide",
+                        "control_channel_list": "453.750"
+                    }
+                ]
             }
         ]
     },

@@ -39,6 +39,25 @@ import gnuradio.op25_repeater as op25_repeater
 CC_TIMEOUT_RETRIES = 3   # Number of control channel framing timeouts before hunting
 VC_TIMEOUT_RETRIES = 3   # Number of voice channel framing timeouts before expiry
 TGID_DEFAULT_PRIO = 3    # Default tgid priority when unassigned
+
+# Multi-site scanning constants
+# Fast scanning mode (SDS100-like performance)
+FAST_SCAN_TIMEOUT = 0.4         # Fast scan: 0.4 seconds per site (2.5 sites/second)
+FAST_ACTIVITY_THRESHOLD = 0.08   # Fast scan: 80ms activity detection window
+FAST_SWITCH_DELAY = 0.03         # Fast scan: 30ms receiver settling time
+
+# Thorough scanning mode (original implementation) 
+THOROUGH_SCAN_TIMEOUT = 8.0      # Thorough scan: 8 seconds per site
+THOROUGH_ACTIVITY_THRESHOLD = 2.0 # Thorough scan: 2 second activity window
+THOROUGH_SWITCH_DELAY = 0.5      # Thorough scan: 500ms receiver settling
+
+# Priority scanning mode (hybrid)
+PRIORITY_SCAN_TIMEOUT = 1.0      # Priority scan: 1 second per site
+PRIORITY_ACTIVITY_THRESHOLD = 0.25 # Priority scan: 250ms activity window
+PRIORITY_SWITCH_DELAY = 0.1      # Priority scan: 100ms receiver settling
+
+# Default scanning mode
+DEFAULT_SCANNING_MODE = 'fast'   # Options: 'fast', 'thorough', 'priority'
 TGID_HOLD_TIME = 2.0     # Number of seconds to give previously active tgid exclusive channel access
 TGID_SKIP_TIME = 4.0     # Number of seconds to blacklist a previously skipped tgid
 TGID_EXPIRY_TIME = 1.0   # Number of seconds to allow tgid to remain active with no updates received
@@ -290,6 +309,237 @@ class rx_ctl(object):
                                    "rtag":    rtag })
 
 #################
+class site_info(object):
+    """Information about a P25 site within a system"""
+    def __init__(self, site_id, name, control_channels, location=None):
+        self.site_id = site_id
+        self.name = name
+        self.control_channels = control_channels  # List of frequencies
+        self.location = location
+        self.cc_index = -1
+        self.cc_retries = 0
+        self.last_activity = 0.0
+        self.last_tsbk = 0.0
+        self.active_calls = 0
+        self.signal_quality = 0.0
+        self.locked = False
+        self.failure_count = 0
+        
+    def next_cc(self):
+        """Move to next control channel for this site"""
+        self.cc_retries = 0
+        self.cc_index += 1
+        if self.cc_index >= len(self.control_channels):
+            self.cc_index = 0
+            
+    def get_current_cc(self):
+        """Get current control channel frequency"""
+        if self.cc_index >= 0 and self.cc_index < len(self.control_channels):
+            return self.control_channels[self.cc_index]
+        return None
+        
+    def timeout_cc(self):
+        """Handle control channel timeout"""
+        self.cc_retries += 1
+        if self.cc_retries >= CC_TIMEOUT_RETRIES:
+            self.next_cc()
+            self.failure_count += 1
+            return True
+        return False
+        
+    def update_activity(self, timestamp):
+        """Update last activity timestamp"""
+        self.last_activity = timestamp
+        
+    def has_recent_activity(self, current_time, threshold=SITE_ACTIVITY_THRESHOLD):
+        """Check if site has recent activity"""
+        return (current_time - self.last_activity) < threshold
+        
+class multi_site_scanner(object):
+    """Scanner for multiple P25 sites within a system"""
+    def __init__(self, sites, debug=0, scanning_mode='fast'):
+        self.sites = sites  # Dictionary of site_id -> site_info
+        self.debug = debug
+        self.current_site_id = None
+        self.last_site_switch = 0.0
+        self.scan_enabled = len(sites) > 1
+        self.site_switch_count = 0
+        self.scanning_mode = scanning_mode
+        self.immediate_activity = False  # Flag for immediate activity detection
+        self.priority_sites = {}  # Sites with recent activity get priority
+        self.last_activity_check = 0.0
+        
+        # Set scanning parameters based on mode
+        self.set_scanning_mode(scanning_mode)
+        
+        # Performance tracking
+        self.scan_rate_history = []
+        self.last_scan_time = 0.0
+        
+        if self.sites:
+            # Start with first site
+            self.current_site_id = list(self.sites.keys())[0]
+            self.sites[self.current_site_id].next_cc()  # Initialize first CC
+            
+    def set_scanning_mode(self, mode):
+        """Set scanning mode and associated parameters"""
+        self.scanning_mode = mode
+        
+        if mode == 'fast':
+            self.scan_timeout = FAST_SCAN_TIMEOUT
+            self.activity_threshold = FAST_ACTIVITY_THRESHOLD  
+            self.switch_delay = FAST_SWITCH_DELAY
+        elif mode == 'thorough':
+            self.scan_timeout = THOROUGH_SCAN_TIMEOUT
+            self.activity_threshold = THOROUGH_ACTIVITY_THRESHOLD
+            self.switch_delay = THOROUGH_SWITCH_DELAY
+        elif mode == 'priority':
+            self.scan_timeout = PRIORITY_SCAN_TIMEOUT
+            self.activity_threshold = PRIORITY_ACTIVITY_THRESHOLD
+            self.switch_delay = PRIORITY_SWITCH_DELAY
+        else:
+            # Default to fast mode
+            self.scan_timeout = FAST_SCAN_TIMEOUT
+            self.activity_threshold = FAST_ACTIVITY_THRESHOLD
+            self.switch_delay = FAST_SWITCH_DELAY
+            
+        if self.debug >= 5:
+            sys.stderr.write('Multi-site scanner: mode=%s, timeout=%.3fs, threshold=%.3fs, delay=%.3fs\n' %
+                           (mode, self.scan_timeout, self.activity_threshold, self.switch_delay))
+            
+    def get_current_site(self):
+        """Get current active site"""
+        if self.current_site_id and self.current_site_id in self.sites:
+            return self.sites[self.current_site_id]
+        return None
+        
+    def switch_to_next_site(self, current_time):
+        """Switch to the next site in rotation"""
+        if not self.scan_enabled or not self.sites:
+            return False
+            
+        # Prevent rapid site switching (uses mode-specific delay)
+        if (current_time - self.last_site_switch) < self.switch_delay:
+            return False
+            
+        # Track scan rate performance
+        if self.last_scan_time > 0:
+            scan_interval = current_time - self.last_scan_time
+            self.scan_rate_history.append(scan_interval)
+            if len(self.scan_rate_history) > 10:
+                self.scan_rate_history.pop(0)
+        self.last_scan_time = current_time
+            
+        # Priority mode: check priority sites first
+        if self.scanning_mode == 'priority' and self.priority_sites:
+            priority_list = list(self.priority_sites.keys())
+            site_list = priority_list + [s for s in self.sites.keys() if s not in priority_list]
+        else:
+            site_list = list(self.sites.keys())
+            
+        if self.current_site_id in site_list:
+            current_idx = site_list.index(self.current_site_id)
+            next_idx = (current_idx + 1) % len(site_list)
+            self.current_site_id = site_list[next_idx]
+        else:
+            self.current_site_id = site_list[0]
+            
+        self.last_site_switch = current_time
+        self.site_switch_count += 1
+        
+        # Initialize the new site's control channel
+        current_site = self.get_current_site()
+        if current_site:
+            current_site.next_cc()
+            
+        if self.debug >= 5:
+            avg_rate = sum(self.scan_rate_history) / len(self.scan_rate_history) if self.scan_rate_history else 0
+            sites_per_sec = 1.0 / avg_rate if avg_rate > 0 else 0
+            sys.stderr.write('%s Multi-site scanner: switched to site %s (%s) [%.1f sites/sec]\n' % 
+                           (log_ts.get(current_time), self.current_site_id, 
+                            current_site.name if current_site else "unknown", sites_per_sec))
+        return True
+        
+    def should_switch_site(self, current_time):
+        """Determine if we should switch to a different site"""
+        if not self.scan_enabled:
+            return False
+            
+        current_site = self.get_current_site()
+        if not current_site:
+            return True
+            
+        # Fast mode: immediate switching unless very recent activity
+        if self.scanning_mode == 'fast':
+            # Check for immediate activity (TSBK received in last 100ms)
+            if current_site.has_recent_activity(current_time, self.activity_threshold):
+                # Add to priority sites for faster return visits
+                self.priority_sites[self.current_site_id] = current_time
+                return False
+                
+            # Fast switch after short timeout
+            time_on_site = current_time - self.last_site_switch  
+            return time_on_site >= self.scan_timeout
+            
+        # Priority mode: balance speed with activity detection
+        elif self.scanning_mode == 'priority':
+            if current_site.has_recent_activity(current_time, self.activity_threshold):
+                self.priority_sites[self.current_site_id] = current_time
+                return False
+                
+            time_on_site = current_time - self.last_site_switch
+            return time_on_site >= self.scan_timeout
+            
+        # Thorough mode: original logic
+        else:
+            if current_site.has_recent_activity(current_time, self.activity_threshold):
+                return False
+                
+            time_on_site = current_time - self.last_site_switch
+            if time_on_site >= self.scan_timeout:
+                return True
+                
+            # Switch if control channel keeps failing
+            if current_site.failure_count >= 3:
+                current_site.failure_count = 0
+                return True
+                
+        return False
+        
+    def update_site_activity(self, site_id, timestamp):
+        """Update activity for a specific site"""
+        if site_id in self.sites:
+            self.sites[site_id].update_activity(timestamp)
+            # Mark as priority site in priority/fast modes
+            if self.scanning_mode in ['fast', 'priority']:
+                self.priority_sites[site_id] = timestamp
+                
+        # Clean up old priority sites
+        cutoff_time = timestamp - (self.activity_threshold * 10)  # Keep priority for 10x threshold
+        expired_sites = [s for s, t in self.priority_sites.items() if t < cutoff_time]
+        for site in expired_sites:
+            del self.priority_sites[site]
+            
+    def get_scan_rate(self):
+        """Get current scanning rate in sites per second"""
+        if not self.scan_rate_history:
+            return 0.0
+        avg_interval = sum(self.scan_rate_history) / len(self.scan_rate_history)
+        return 1.0 / avg_interval if avg_interval > 0 else 0.0
+        
+    def get_scanning_stats(self):
+        """Get detailed scanning statistics"""
+        return {
+            'mode': self.scanning_mode,
+            'sites_per_second': self.get_scan_rate(),
+            'switch_count': self.site_switch_count,
+            'priority_sites': len(self.priority_sites),
+            'scan_timeout': self.scan_timeout,
+            'activity_threshold': self.activity_threshold,
+            'switch_delay': self.switch_delay
+        }
+
+#################
 # P25 system class
 class p25_system(object):
     def __init__(self, debug, config, rx_ctl = None):
@@ -309,10 +559,17 @@ class p25_system(object):
         self.crypt_behavior = 1
         self.crypt_keys = {}
         self.cc_rate = 4800
+        # Legacy single-site support
         self.cc_list = []
         self.cc_index = -1
         self.cc_timeouts = 0
         self.cc_msgq_id = None
+        
+        # Multi-site scanning support
+        self.multi_site_scanner = None
+        self.sites = {}
+        self.last_site_check = 0.0
+        self.scanning_mode = DEFAULT_SCANNING_MODE
         self.last_tsbk = 0.0
         self.secondary = {}
         self.adjacent = {}
@@ -368,6 +625,65 @@ class p25_system(object):
 
         self.crypt_behavior = int(from_dict(self.config, 'crypt_behavior', 1))
 
+        # Check for multi-site configuration
+        if 'sites' in self.config and self.config['sites']:
+            self.init_multi_site_config()
+        else:
+            self.init_legacy_single_site_config()
+            
+    def init_multi_site_config(self):
+        """Initialize multi-site scanning configuration"""
+        # Get scanning mode from config
+        self.scanning_mode = from_dict(self.config, 'scanning_mode', DEFAULT_SCANNING_MODE)
+        
+        sys.stderr.write("%s [%s] Initializing multi-site scanning with %d sites (mode: %s)\n" % 
+                        (log_ts.get(), self.sysname, len(self.config['sites']), self.scanning_mode))
+        
+        for site_config in self.config['sites']:
+            site_id = site_config['site_id']
+            site_name = from_dict(site_config, 'name', f'Site {site_id}')
+            cc_list = site_config['control_channel_list']
+            location = from_dict(site_config, 'location', None)
+            
+            if not cc_list:
+                sys.stderr.write("Warning: Site %s has empty control_channel_list, skipping\n" % site_id)
+                continue
+                
+            control_channels = []
+            for f in cc_list.split(','):
+                control_channels.append(get_frequency(f))
+                
+            site = site_info(site_id, site_name, control_channels, location)
+            self.sites[site_id] = site
+            
+            sys.stderr.write("%s [%s] Added site %s (%s) with %d control channels\n" % 
+                            (log_ts.get(), self.sysname, site_id, site_name, len(control_channels)))
+        
+        if not self.sites:
+            sys.stderr.write("Error: No valid sites found in multi-site configuration\n")
+            sys.exit(1)
+            
+        # Initialize multi-site scanner with scanning mode
+        self.multi_site_scanner = multi_site_scanner(self.sites, self.debug, self.scanning_mode)
+        
+        # Log scanning performance expectations
+        if self.scanning_mode == 'fast':
+            expected_rate = 1.0 / FAST_SCAN_TIMEOUT
+            sys.stderr.write("%s [%s] Fast scanning mode: target %.1f sites/second\n" % 
+                            (log_ts.get(), self.sysname, expected_rate))
+        elif self.scanning_mode == 'priority':
+            expected_rate = 1.0 / PRIORITY_SCAN_TIMEOUT  
+            sys.stderr.write("%s [%s] Priority scanning mode: target %.1f sites/second\n" % 
+                            (log_ts.get(), self.sysname, expected_rate))
+        
+        # Populate legacy cc_list for backward compatibility with first site
+        first_site = self.multi_site_scanner.get_current_site()
+        if first_site:
+            self.cc_list = first_site.control_channels.copy()
+            self.cc_index = 0
+            
+    def init_legacy_single_site_config(self):
+        """Initialize legacy single-site configuration"""
         cc_list = from_dict(self.config, 'control_channel_list', "")
         if cc_list == "":
             sys.stderr.write("Aborting. P25 Trunking 'control_channel_list' parameter is empty or not found\n")
@@ -497,6 +813,16 @@ class p25_system(object):
             if self.debug > 10:
                 sys.stderr.write("%s [%s] Assigning control channel to receiver[%d]\n" % (log_ts.get(), self.sysname, msgq_id))
 
+            # Check for site scanning
+            current_time = time.time()
+            if self.multi_site_scanner and self.multi_site_scanner.should_switch_site(current_time):
+                if self.multi_site_scanner.switch_to_next_site(current_time):
+                    # Update legacy cc_list and cc_index for compatibility
+                    current_site = self.multi_site_scanner.get_current_site()
+                    if current_site:
+                        self.cc_list = current_site.control_channels.copy()
+                        self.cc_index = current_site.cc_index
+                        
             assert self.cc_list[self.cc_index]
             return self.cc_list[self.cc_index]
         else:
@@ -504,6 +830,17 @@ class p25_system(object):
 
     def next_cc(self):
         self.cc_retries = 0
+        
+        # Update current site if using multi-site scanner
+        if self.multi_site_scanner:
+            current_site = self.multi_site_scanner.get_current_site()
+            if current_site:
+                current_site.next_cc()
+                self.cc_index = current_site.cc_index
+                self.cc_list = current_site.control_channels.copy()
+                return
+        
+        # Legacy single-site logic
         self.cc_index += 1
         if self.cc_index >= len(self.cc_list):
             self.cc_index = 0
@@ -557,6 +894,13 @@ class p25_system(object):
         nac = get_ordinals(s[:2])                           # first two bytes are NAC
         self.set_nac(nac)
         s = s[2:]
+        
+        # Update activity for multi-site scanning
+        if self.multi_site_scanner:
+            current_site = self.multi_site_scanner.get_current_site()
+            if current_site:
+                current_site.update_activity(curr_time)
+                current_site.last_tsbk = curr_time
 
         updated = 0
         if m_type == 7:                                     # TSBK
@@ -1646,7 +1990,21 @@ class p25_system(object):
         d['top_line']      += '  System %s' % (wacn_system_id_str)
         d['top_line']      += '  Site %s' % (rfss_site_id_str)
         d['top_line']      += '  NAC %3X' % (self.nac)
-        d['top_line']      += '  CC %f' % ((self.rfss_chan if self.rfss_chan is not None else self.cc_list[self.cc_index]) / 1e6)
+        # Multi-site scanning info
+        if self.multi_site_scanner:
+            current_site = self.multi_site_scanner.get_current_site()
+            if current_site:
+                d['top_line']  += '  Site: %s' % current_site.name
+                d['top_line']  += '  CC %f' % (current_site.get_current_cc() / 1e6)
+                d['current_site_id'] = current_site.site_id
+                d['current_site_name'] = current_site.name
+                d['site_switch_count'] = self.multi_site_scanner.site_switch_count
+                d['sites_configured'] = len(self.multi_site_scanner.sites)
+            else:
+                d['top_line']  += '  CC %f' % (self.cc_list[self.cc_index] / 1e6)
+        else:
+            d['top_line']  += '  CC %f' % ((self.rfss_chan if self.rfss_chan is not None else self.cc_list[self.cc_index]) / 1e6)
+            
         d['top_line']      += '  tsbks %d' % (self.stats['tsbk_count'])
         d['callsign']       = self.callsign
         d['nac']            = self.nac
@@ -1662,6 +2020,27 @@ class p25_system(object):
         d['frequency_data'] = {}
         d['patch_data']     = {}
         d['last_tsbk']      = self.last_tsbk
+        
+        # Add multi-site scanning status
+        if self.multi_site_scanner:
+            d['multi_site_scanning'] = True
+            scanning_stats = self.multi_site_scanner.get_scanning_stats()
+            d['scanning_stats'] = scanning_stats
+            d['sites'] = {}
+            for site_id, site in self.multi_site_scanner.sites.items():
+                d['sites'][site_id] = {
+                    'name': site.name,
+                    'location': site.location,
+                    'current_cc': site.get_current_cc(),
+                    'cc_index': site.cc_index,
+                    'last_activity': site.last_activity,
+                    'active_calls': site.active_calls,
+                    'failure_count': site.failure_count,
+                    'control_channels': site.control_channels,
+                    'is_priority': site_id in self.multi_site_scanner.priority_sites
+                }
+        else:
+            d['multi_site_scanning'] = False
 
         t = time.time()
 
