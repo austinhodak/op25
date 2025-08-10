@@ -901,6 +901,16 @@ class p25_system(object):
             if current_site:
                 current_site.update_activity(curr_time)
                 current_site.last_tsbk = curr_time
+                
+            # Periodic site switching check (every 0.1 seconds)
+            if (curr_time - self.last_site_check) >= 0.1:
+                self.last_site_check = curr_time
+                if self.multi_site_scanner.should_switch_site(curr_time):
+                    if self.multi_site_scanner.switch_to_next_site(curr_time):
+                        # Request control channel change by releasing current CC
+                        if self.cc_msgq_id is not None:
+                            self.release_cc(self.cc_msgq_id)
+                            # The system will call get_cc() again, which will provide the new site's CC
 
         updated = 0
         if m_type == 7:                                     # TSBK
