@@ -351,7 +351,7 @@ class site_info(object):
         """Update last activity timestamp"""
         self.last_activity = timestamp
         
-    def has_recent_activity(self, current_time, threshold=SITE_ACTIVITY_THRESHOLD):
+    def has_recent_activity(self, current_time, threshold=FAST_ACTIVITY_THRESHOLD):
         """Check if site has recent activity"""
         return (current_time - self.last_activity) < threshold
         
