@@ -814,15 +814,31 @@ class p25_system(object):
             if self.debug > 10:
                 sys.stderr.write("%s [%s] Assigning control channel to receiver[%d]\n" % (log_ts.get(), self.sysname, msgq_id))
 
-            # Check for site scanning
+            # Check for site scanning - this is the main periodic check
             current_time = time.time()
-            if self.multi_site_scanner and self.multi_site_scanner.should_switch_site(current_time):
-                if self.multi_site_scanner.switch_to_next_site(current_time):
-                    # Update legacy cc_list and cc_index for compatibility
+            if self.multi_site_scanner:
+                # Force a site switch check every time get_cc is called
+                if self.multi_site_scanner.should_switch_site(current_time):
+                    if self.multi_site_scanner.switch_to_next_site(current_time):
+                        # Update legacy cc_list and cc_index for compatibility
+                        current_site = self.multi_site_scanner.get_current_site()
+                        if current_site:
+                            self.cc_list = current_site.control_channels.copy()
+                            self.cc_index = current_site.cc_index
+                            
+                # Also force periodic timeout-based switching by clearing CC assignment
+                # This ensures switching happens even when there are no natural timeouts
+                time_since_switch = current_time - self.multi_site_scanner.last_site_switch
+                scan_timeout = getattr(self.multi_site_scanner, 'scan_timeout', 1.0)
+                
+                if time_since_switch > (scan_timeout + 0.5):  # Add 0.5s grace period
                     current_site = self.multi_site_scanner.get_current_site()
-                    if current_site:
-                        self.cc_list = current_site.control_channels.copy()
-                        self.cc_index = current_site.cc_index
+                    if current_site and not current_site.has_recent_activity(current_time, self.multi_site_scanner.activity_threshold):
+                        # Force a site switch by making this call fail, which will trigger timeout_cc
+                        self.cc_msgq_id = None
+                        if self.debug >= 5:
+                            sys.stderr.write("%s [%s] Forcing site switch due to inactivity timeout\n" % (log_ts.get(), self.sysname))
+                        return None
                         
             assert self.cc_list[self.cc_index]
             return self.cc_list[self.cc_index]
@@ -872,14 +888,6 @@ class p25_system(object):
             current_site = self.multi_site_scanner.get_current_site()
             if current_site:
                 current_site.cc_retries = 0
-            current_time = time.time()
-            if (current_time - self.last_site_check) >= 0.1:
-                self.last_site_check = current_time
-                if self.multi_site_scanner.should_switch_site(current_time):
-                    if self.multi_site_scanner.switch_to_next_site(current_time):
-                        # Force a CC change by clearing the current CC assignment
-                        self.cc_msgq_id = None
-                        return False  # This will cause the system to request a new CC
                         
         self.cc_retries = 0  # Reset system-level retries for backward compatibility
         return True
