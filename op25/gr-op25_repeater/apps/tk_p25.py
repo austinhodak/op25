@@ -130,7 +130,7 @@ def get_tgid(tgid):
 #################
 # Main trunking class
 class rx_ctl(object):
-    def __init__(self, debug=0, frequency_set=None, nbfm_ctrl=None, fa_ctrl=None, chans={}):
+    def __init__(self, debug=0, frequency_set=None, nbfm_ctrl=None, fa_ctrl=None, chans={}, rx_q=None):
         self.frequency_set = frequency_set
         self.nbfm_ctrl = nbfm_ctrl
         self.fa_ctrl = fa_ctrl
@@ -138,6 +138,7 @@ class rx_ctl(object):
         self.receivers = {}
         self.systems = {}
         self.chans = chans
+        self.rx_q = rx_q
         self.cleanup_timer = time.time()
         self.call_log = deque(maxlen=CALL_LOG_MAX_LEN)
         self.call_log_mutex = threading.Lock()
@@ -235,11 +236,14 @@ class rx_ctl(object):
                                 receiver = self.receivers[rcvr_id]['rx_rcvr']
                                 if receiver and receiver.msgq_id == p25_system.cc_msgq_id:
                                     # Create and inject timeout message
-                                    timeout_msg = gr.message().make_from_string("", -1, p25_system.cc_msgq_id << 1, 0)
-                                    if not self.rx_q.full_p():
-                                        self.rx_q.insert_tail(timeout_msg)
-                                        if p25_system.debug >= 5:
-                                            sys.stderr.write("%s [%s] Injected timeout message for receiver[%d]\n" % (log_ts.get(), p25_sysname, p25_system.cc_msgq_id))
+                                    if self.rx_q is not None:
+                                        timeout_msg = gr.message().make_from_string("", -1, p25_system.cc_msgq_id << 1, 0)
+                                        if not self.rx_q.full_p():
+                                            self.rx_q.insert_tail(timeout_msg)
+                                            if p25_system.debug >= 5:
+                                                sys.stderr.write("%s [%s] Injected timeout message for receiver[%d]\n" % (log_ts.get(), p25_sysname, p25_system.cc_msgq_id))
+                                    elif p25_system.debug >= 1:
+                                        sys.stderr.write("%s [%s] Warning: rx_q not available for timeout injection\n" % (log_ts.get(), p25_sysname))
                                     break
             
             self.cleanup_timer = curr_time

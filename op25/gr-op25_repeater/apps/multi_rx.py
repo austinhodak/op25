@@ -690,7 +690,7 @@ class rx_block (gr.top_block):
             self.trunking = None
 
         if self.trunking is not None:
-            self.trunk_rx = self.trunking.rx_ctl(frequency_set = self.change_freq, nbfm_ctrl = self.nbfm_control, fa_ctrl = self.fa_control, debug = self.verbosity, chans = config['chans'])
+            self.trunk_rx = self.trunking.rx_ctl(frequency_set = self.change_freq, nbfm_ctrl = self.nbfm_control, fa_ctrl = self.fa_control, debug = self.verbosity, chans = config['chans'], rx_q = self.rx_q)
             self.du_watcher = du_queue_watcher(self.rx_q, self.trunk_rx.process_qmsg)
             sys.stderr.write("Enabled trunking module: %s\n" % config['module'])
 
