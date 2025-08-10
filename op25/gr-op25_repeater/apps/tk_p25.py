@@ -563,6 +563,7 @@ class p25_system(object):
         self.cc_list = []
         self.cc_index = -1
         self.cc_timeouts = 0
+        self.cc_retries = 0
         self.cc_msgq_id = None
         
         # Multi-site scanning support
@@ -829,6 +830,7 @@ class p25_system(object):
             return None 
 
     def next_cc(self):
+        # Reset retry counts
         self.cc_retries = 0
         
         # Update current site if using multi-site scanner
@@ -864,10 +866,12 @@ class p25_system(object):
     def valid_cc(self, msgq_id):
         if msgq_id is None or self.cc_msgq_id is None or msgq_id != self.cc_msgq_id:
             return False;
-        self.cc_retries = 0
-        
-        # Periodic site switching check when CC is valid
+            
+        # Reset retry counts for both system and current site
         if self.multi_site_scanner:
+            current_site = self.multi_site_scanner.get_current_site()
+            if current_site:
+                current_site.cc_retries = 0
             current_time = time.time()
             if (current_time - self.last_site_check) >= 0.1:
                 self.last_site_check = current_time
@@ -876,15 +880,32 @@ class p25_system(object):
                         # Force a CC change by clearing the current CC assignment
                         self.cc_msgq_id = None
                         return False  # This will cause the system to request a new CC
-        
+                        
+        self.cc_retries = 0  # Reset system-level retries for backward compatibility
         return True
 
     def timeout_cc(self, msgq_id):
         if msgq_id is None or self.cc_msgq_id is None or msgq_id != self.cc_msgq_id:
             return False;
-        self.cc_retries += 1
-        if self.cc_retries >= CC_TIMEOUT_RETRIES:
-            self.next_cc()
+            
+        # Update retry counts for both system and current site
+        if self.multi_site_scanner:
+            current_site = self.multi_site_scanner.get_current_site()
+            if current_site:
+                current_site.cc_retries += 1
+                self.cc_retries = current_site.cc_retries  # Sync for backward compatibility
+                if current_site.cc_retries >= CC_TIMEOUT_RETRIES:
+                    self.next_cc()
+            else:
+                self.cc_retries += 1
+                if self.cc_retries >= CC_TIMEOUT_RETRIES:
+                    self.next_cc()
+        else:
+            # Legacy single-site mode
+            self.cc_retries += 1
+            if self.cc_retries >= CC_TIMEOUT_RETRIES:
+                self.next_cc()
+                
         return self.get_cc(msgq_id)
 
     def sync_cc(self):
@@ -892,6 +913,17 @@ class p25_system(object):
 
     def get_nac(self):
         return self.nac
+        
+    def get_cc_retries(self):
+        """Get control channel retry count for current site"""
+        if self.multi_site_scanner:
+            current_site = self.multi_site_scanner.get_current_site()
+            if current_site:
+                return current_site.cc_retries
+            return 0
+        else:
+            # Legacy single-site mode
+            return getattr(self, 'cc_retries', 0)
 
     def set_nac(self, nac):
         if (nac is None) or (nac == 0) or (nac == 0xffff) or ((self.nac !=0) and (nac != self.nac)):
